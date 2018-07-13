@@ -12,16 +12,17 @@
  * This must evenly divide the sample rate, otherwise bad things happen.
  */
 #define	TIME_QUANTUM		30
+
 /*
  * Compressor target signal level. Signals weaker than this get amplified.
  * Signals stronger than this get suppressed.
  */
-#define	COMPR_TGT		0.66	/* dimensionless */
+#define	COMPR_TGT		0.7	/* dimensionless */
 /*
  * Compressor signal minimum energy level. This limits by how much we can
  * amplify sounds in th compressor (0.6 = max amplification 40%).
  */
-#define	COMPR_MIN_ENERGY	0.5	/* dimensionless */
+#define	COMPR_MIN_ENERGY	0.2	/* dimensionless */
 
 /*
  * How quickly the noise level randomizer jumps around as fraction of
@@ -29,9 +30,18 @@
  */
 #define	NOISE_RAND_RATE		2.0	/* FILTER_IN rate arg */
 
+#if	defined(_MSC_VER)
+#define	inline	__inline
+#endif
+
+#ifndef	ABS
+#define	ABS(x)	((x) > 0 ? (x) : -(x))
+#endif
+
 struct distort_s {
 	unsigned	srate;
 	double		compr_energy;
+	double		rms;
 	double		noise_level;
 	double		noise_level_cur;
 	double		amplify;
@@ -59,10 +69,7 @@ struct distort_s {
 
 static void distort_EQ(distort_t *dis, const int16_t *samples,
     int16_t *out_samples, size_t num_samples);
-#ifdef	XXX
-static void distort_compressor(distort_t *dis, int16_t *samples,
-    size_t num_samples);
-#endif	/* XXX */
+static void compressor(distort_t *dis, int16_t *samples, size_t num_samples);
 static void distort_noise_randomize(distort_t *dis, size_t num_samples);
 static void distort_process(distort_t *dis);
 static void distort_impl(distort_t *dis, const int16_t *in_samples,
@@ -144,8 +151,6 @@ clampi(int x, int min_val, int max_val)
 	return (x);
 }
 
-#define	NULL_VECT2		((vect2_t){NAN, NAN})
-#define	IS_NULL_VECT(a)		(isnan((a).x))
 #define	VECT2(x, y)		((vect2_t){(x), (y)})
 typedef struct vect2_s {
 	double	x;
@@ -177,13 +182,12 @@ fx_lin(double x, double x1, double y1, double x2, double y2)
  * Otherwise the function returns NAN.
  */
 static double
-fx_lin_multi(double x, const vect2_t *points, int extrapolate)
+fx_lin_multi(double x, const vect2_t *points, int count, int extrapolate)
 {
-	assert(!IS_NULL_VECT(points[0]));
-	assert(!IS_NULL_VECT(points[1]));
+	int i;
 
-	for (;;) {
-		vect2_t p1 = points[0], p2 = points[1];
+	for (i = 0; i + 1 < count; i++) {
+		vect2_t p1 = points[i], p2 = points[i + 1];
 
 		assert(p1.x < p2.x);
 
@@ -197,16 +201,14 @@ fx_lin_multi(double x, const vect2_t *points, int extrapolate)
 		if (x <= p2.x)
 			return (fx_lin(x, p1.x, p1.y, p2.x, p2.y));
 		/* X outside of range to the right */
-		if (IS_NULL_VECT(points[2])) {
+		if (i + 2 == count) {
 			if (extrapolate)
 				return (fx_lin(x, p1.x, p1.y, p2.x, p2.y));
 			break;
 		}
-
-		points++;
 	}
 
-	return (NAN);
+	return (0);
 }
 
 /*
@@ -299,6 +301,8 @@ distort_clear_buffers(distort_t *dis)
 	dis->inbuf_fill = 0;
 	dis->outbuf_fill = 0;
 	dis->outbuf_fill_act = 0;
+	dis->compr_energy = 1.0;
+	dis->rms = 0;
 }
 
 static void
@@ -321,6 +325,8 @@ distort_impl(distort_t *dis, const int16_t *in_samples, int16_t *out_samples,
 	/* Stick newly incoming data on the end of our input buffer */
 	memcpy(&dis->inbuf[dis->inbuf_fill], in_samples,
 	    sizeof (*in_samples) * num_samples);
+	/* Pre-process input via the dynamics compressor */
+	compressor(dis, &dis->inbuf[dis->inbuf_fill], num_samples);
 	dis->inbuf_fill += num_samples;
 
 	distort_process(dis);
@@ -376,14 +382,10 @@ distort_process(distort_t *dis)
 
 		/*
 		 * Full chunk processing only happens on odd chunk.
-		 * This is when we want to apply the compressor & noise
-		 * level randomizer (don't want to have those differ
-		 * between EQ passes).
+		 * This is when we want to apply the noise level randomizer
+		 * (don't want to have that differ between EQ passes).
 		 */
 		if (dis->chunk_a_b == 0) {
-#ifdef	XXX
-			distort_compressor(dis, samples, chunksz);
-#endif
 			distort_noise_randomize(dis, chunksz);
 		}
 
@@ -428,26 +430,38 @@ distort_process(distort_t *dis)
 	}
 }
 
-#ifdef	XXX
 static void
-distort_compressor(distort_t *dis, int16_t *samples, size_t num_samples)
+compressor(distort_t *dis, int16_t *samples, size_t num_samples)
 {
 	size_t i;
+	enum { STEP = 200 };
 
 	for (i = 0; i < num_samples; i++) {
-		double sample = (samples[i] >= 0 ? samples[i] : -samples[i]);
-		double e = sample / (INT16_MAX * 1.0);
+		double e = ABS(samples[i]) / ((double)INT16_MAX * COMPR_TGT);
 
-		e = (e > COMPR_MIN_ENERGY ? e : COMPR_MIN_ENERGY);
-		if (e >= dis->compr_energy)
-			FILTER_IN(dis->compr_energy, 1, 1.0, 100.0);
+		/*
+		 * Peak-measurement stage. Very fast acting peak detector that
+		 * slowly decays.
+		 */
+		if (e > dis->rms)
+			dis->rms = e;
+		FILTER_IN(dis->rms, 0, 1.0, 2000.0);
+
+		/*
+		 * Delayed energy measurement stage.
+		 */
+		if (dis->rms >= dis->compr_energy)
+			FILTER_IN(dis->compr_energy, dis->rms, 1.0, STEP / 10);
 		else
-			FILTER_IN(dis->compr_energy, 0, 1.0, 1000.0);
-		samples[i] = clampi(sample / dis->compr_energy,
+			FILTER_IN(dis->compr_energy, dis->rms, 1.0, 10 * STEP);
+
+		if (dis->compr_energy < COMPR_MIN_ENERGY)
+			dis->compr_energy = COMPR_MIN_ENERGY;
+
+		samples[i] = clampi(samples[i] / dis->compr_energy,
 		    INT16_MIN, INT16_MAX);
 	}
 }
-#endif	/* XXX */
 
 static void
 distort_noise_randomize(distort_t *dis, size_t num_samples)
@@ -468,41 +482,57 @@ distort_EQ(distort_t *dis, const int16_t *samples, int16_t *out_samples,
 {
 #define	HZ2SLOT(hz)	(((hz) / (double)dis->srate) * num_samples)
 #define	CENTER_AMPLIFY	1.6
-	const vect2_t clamp_curve[] = {
-	    VECT2(HZ2SLOT(0), 0),
-	    VECT2(HZ2SLOT(250), 0),
-	    VECT2(HZ2SLOT(300), num_samples),
-	    VECT2(HZ2SLOT(1700), CENTER_AMPLIFY * num_samples),
-	    VECT2(HZ2SLOT(3000), num_samples),
-	    VECT2(HZ2SLOT(3500), 0),
-	    VECT2(HZ2SLOT(44500), 0),
-	    VECT2(HZ2SLOT(45000), num_samples),
-	    VECT2(HZ2SLOT(46300), CENTER_AMPLIFY * num_samples),
-	    VECT2(HZ2SLOT(47700), num_samples),
-	    VECT2(HZ2SLOT(47750), 0),
-	    VECT2(HZ2SLOT(48000), 0),
-	    NULL_VECT2
-	};
+	vect2_t clamp_curve[12];
 	size_t i;
+
+	memset(clamp_curve, 0, sizeof (clamp_curve));
+	clamp_curve[0].x = HZ2SLOT(0);
+	clamp_curve[1].x = HZ2SLOT(250);
+
+	clamp_curve[2].x = HZ2SLOT(300);
+	clamp_curve[2].y = num_samples;
+
+	clamp_curve[3].x = HZ2SLOT(1700);
+	clamp_curve[3].y = CENTER_AMPLIFY * num_samples;
+
+	clamp_curve[4].x = HZ2SLOT(3000);
+	clamp_curve[4].y = num_samples;
+
+	clamp_curve[5].x = HZ2SLOT(3500);
+	clamp_curve[6].x = HZ2SLOT(44500);
+
+	clamp_curve[7].x = HZ2SLOT(45000);
+	clamp_curve[7].y = num_samples;
+
+	clamp_curve[8].x = HZ2SLOT(46300);
+	clamp_curve[8].y = CENTER_AMPLIFY * num_samples;
+
+	clamp_curve[9].x = HZ2SLOT(47700);
+	clamp_curve[9].y = num_samples;
+
+	clamp_curve[10].x = HZ2SLOT(47750);
+
+	clamp_curve[11].x = HZ2SLOT(48000);
 
 	for (i = 0; i < num_samples; i++) {
 		/* apply noise to the input */
 		int16_t rand_sample = (int16_t)crc64_rand();
-		dis->fin[i].r = dis->amplify * samples[i] +
-		    rand_sample * dis->noise_level_cur;
+		dis->fin[i].r = (int32_t)(dis->amplify * samples[i] +
+		    rand_sample * dis->noise_level_cur);
 		dis->fin[i].i = 0;
 	}
 	/*
 	 * Transform from time domain to frequency domain.
 	 */
 	kiss_fft(dis->cfg, dis->fin, dis->fout);
+
 	for (i = 0; i < num_samples; i++) {
-		double scale = fx_lin_multi(i, clamp_curve, 1);
+		double scale = fx_lin_multi(i, clamp_curve, 12, 1);
 		/*
 		 * Rescale FFT factors to apply the EQ in frequency domain.
 		 */
-		dis->fout[i].r = dis->fout[i].r * scale;
-		dis->fout[i].i = dis->fout[i].i * scale;
+		dis->fout[i].r = (int32_t)(dis->fout[i].r * scale);
+		dis->fout[i].i = (int32_t)(dis->fout[i].i * scale);
 	}
 	/*
 	 * Inverse transform from frequency domain back to time domain.
