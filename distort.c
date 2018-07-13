@@ -10,8 +10,10 @@
 /*
  * Chunk length expressed as a fraction of a second (1 / TIME_QUANTUM).
  * This must evenly divide the sample rate, otherwise bad things happen.
+ * For 48 kHz data, we can use tighter timing.
  */
-#define	TIME_QUANTUM		32
+#define	TIME_QUANTUM_48K	32
+#define	TIME_QUANTUM_44K	30
 
 #define	EDGE_BLEND		600	/* samples */
 
@@ -48,6 +50,7 @@
 
 struct distort_s {
 	unsigned	srate;
+	unsigned	time_quantum;
 	double		compr_energy;
 	double		rms;
 	double		noise_level;
@@ -262,10 +265,14 @@ distort_init(unsigned sample_rate)
 	assert(sample_rate == 44100 || sample_rate == 48000);
 
 	dis->srate = sample_rate;
+	if (dis->srate == 44100)
+		dis->time_quantum = TIME_QUANTUM_44K;
+	else
+		dis->time_quantum = TIME_QUANTUM_48K;
 	dis->compr_energy = 1.0;
 	dis->amplify = 1.0;
 
-	chunksz = dis->srate / TIME_QUANTUM;
+	chunksz = dis->srate / dis->time_quantum;
 	dis->tmpbuf = calloc(chunksz, sizeof (*dis->tmpbuf));
 	dis->fin = calloc(chunksz, sizeof (*dis->fin));
 	dis->fout = calloc(chunksz, sizeof (*dis->fout));
@@ -318,7 +325,7 @@ distort_impl(distort_t *dis, const int16_t *in_samples, int16_t *out_samples,
     size_t num_samples, double amplify, double noise_level)
 {
 	size_t i = 0;
-	size_t chunksz = dis->srate / TIME_QUANTUM;
+	size_t chunksz = dis->srate / dis->time_quantum;
 	size_t avail;
 
 	dis->amplify = amplify;
@@ -369,7 +376,7 @@ static void
 distort_process(distort_t *dis)
 {
 	size_t consumed;
-	size_t chunksz = dis->srate / TIME_QUANTUM;
+	size_t chunksz = dis->srate / dis->time_quantum;
 
 	for (consumed = 0; consumed + chunksz <= dis->inbuf_fill;
 	    consumed += chunksz - EDGE_BLEND) {
