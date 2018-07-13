@@ -11,7 +11,9 @@
  * Chunk length expressed as a fraction of a second (1 / TIME_QUANTUM).
  * This must evenly divide the sample rate, otherwise bad things happen.
  */
-#define	TIME_QUANTUM		30
+#define	TIME_QUANTUM		32
+
+#define	EDGE_BLEND		600	/* samples */
 
 /*
  * Compressor target signal level. Signals weaker than this get amplified.
@@ -33,6 +35,12 @@
 #if	defined(_MSC_VER)
 #define	inline	__inline
 #endif
+
+#if     !defined(MIN) && !defined(MAX) && !defined(AVG)
+#define MIN(x, y)       ((x) < (y) ? (x) : (y))
+#define MAX(x, y)       ((x) > (y) ? (x) : (y))
+#define AVG(x, y)       (((x) + (y)) / 2)
+#endif  /* MIN or MAX */
 
 #ifndef	ABS
 #define	ABS(x)	((x) > 0 ? (x) : -(x))
@@ -336,21 +344,8 @@ distort_impl(distort_t *dis, const int16_t *in_samples, int16_t *out_samples,
 	 * buffer. If we don't have enough, pad the leading portion with
 	 * silence.
 	 */
-	if (dis->outbuf_fill < num_samples + chunksz) {
-		/*
-		 * Still in the growing phase of the buffer, wait until there
-		 * is enough data there to have a little extra.
-		 */
-		avail = (dis->outbuf_fill >= 2 * chunksz ?
-		    dis->outbuf_fill - 2 * chunksz : 0);
-	} else {
-		/*
-		 * Now with the incoming data, we should always have enough,
-		 * so start handing it out.
-		 */
-		avail = (dis->outbuf_fill >= chunksz ?
-		    dis->outbuf_fill - chunksz : 0);
-	}
+	avail = MIN(dis->outbuf_fill,
+	    dis->outbuf_fill - (chunksz - dis->inbuf_fill));
 	if (num_samples > avail) {
 		i = num_samples - avail;
 		memset(out_samples, 0, sizeof (*out_samples) * i);
@@ -376,8 +371,8 @@ distort_process(distort_t *dis)
 	size_t consumed;
 	size_t chunksz = dis->srate / TIME_QUANTUM;
 
-	for (consumed = 0; consumed + chunksz < dis->inbuf_fill;
-	    consumed += chunksz / 2) {
+	for (consumed = 0; consumed + chunksz <= dis->inbuf_fill;
+	    consumed += chunksz - EDGE_BLEND) {
 		int16_t *samples = &dis->inbuf[consumed];
 
 		/*
@@ -395,13 +390,13 @@ distort_process(distort_t *dis)
 		if (dis->outbuf_fill_act != 0) {
 			size_t i;
 
-			for (i = 0; i < chunksz / 2; i++) {
+			for (i = 0; i < EDGE_BLEND; i++) {
 				int16_t oldval =
 				    dis->outbuf[dis->outbuf_fill + i];
 				int16_t newval = dis->tmpbuf[i];
 
 				dis->tmpbuf[i] = wavg(oldval, newval,
-				    i / (chunksz * 0.5));
+				    i / (double)EDGE_BLEND);
 			}
 		}
 
@@ -415,8 +410,8 @@ distort_process(distort_t *dis)
 		}
 		memcpy(&dis->outbuf[dis->outbuf_fill],
 		    dis->tmpbuf, sizeof (*dis->tmpbuf) * chunksz);
-		dis->outbuf_fill += chunksz / 2;
-		dis->outbuf_fill_act = dis->outbuf_fill + chunksz / 2;
+		dis->outbuf_fill += chunksz - EDGE_BLEND;
+		dis->outbuf_fill_act = dis->outbuf_fill + EDGE_BLEND;
 
 		dis->chunk_a_b = !dis->chunk_a_b;
 	}
