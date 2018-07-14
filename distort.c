@@ -483,16 +483,55 @@ distort_EQ(distort_t *dis, const int16_t *samples, int16_t *out_samples,
     size_t num_samples)
 {
 #define	HZ2SLOT(hz)	(((hz) / (double)dis->srate) * num_samples)
+#define	LOW_AMPLIFY	1.4
 #define	CENTER_AMPLIFY	1.6
 	vect2_t clamp_curve[12];
 	size_t i;
 
 	memset(clamp_curve, 0, sizeof (clamp_curve));
+	/*
+	 * The points below describe a band filter correction curve.
+	 * The array is composed of 2-space vectors, i.e. 2D points.
+	 * X specifies the frequency, Y specifies the loudness multiplier
+	 * (which goes from 0 to `num_samples', `num_samples' being current
+	 * volume at that point). When we set the value to greater than
+	 * `num_samples', we are boosting the volume beyond its current
+	 * level. We've memset the array to zero above, so any curve points
+	 * we don't set are zero.
+	 *
+	 * Due to how the FFT works, the array below is actually mirrored
+	 * around the maximum sample rate frequency (hence why the array
+	 * points' Y values for array indices 6-12 are mirror images of
+	 * the Y values of the indices 1-5).
+	 *
+	 * The frequency modification curve we use looks as follows
+	 * (linear volume):
+	 *
+	 * volume amp ^
+	 * [relative] |
+	 *            |
+	 *       1.6x +------------------------+
+	 *            |                ___---' |'-_
+	 *       1.4x +------------+--'        |   '-_
+	 *            |           /|           |      '-_
+	 *            |          / |           |         '-_
+	 *       1.0x +---------/--|-----------|------------+
+	 * (orig lvl) |        /   |           |            |\
+	 *            |       /    |           |            | \
+	 *            |      /     |           |            |  \
+	 *            |     /      |           |            |   \
+	 *       0.0x +----+-------+-----------+------------+----+------>
+	 *                240     300        1700         3000  3500  freq
+	 *                                                             [hz]
+	 */
 	clamp_curve[0].x = HZ2SLOT(0);
-	clamp_curve[1].x = HZ2SLOT(250);
+	clamp_curve[0].y = 0;
+
+	clamp_curve[1].x = HZ2SLOT(240);
+	clamp_curve[1].y = 0;
 
 	clamp_curve[2].x = HZ2SLOT(300);
-	clamp_curve[2].y = num_samples;
+	clamp_curve[2].y = LOW_AMPLIFY * num_samples;
 
 	clamp_curve[3].x = HZ2SLOT(1700);
 	clamp_curve[3].y = CENTER_AMPLIFY * num_samples;
@@ -501,7 +540,10 @@ distort_EQ(distort_t *dis, const int16_t *samples, int16_t *out_samples,
 	clamp_curve[4].y = num_samples;
 
 	clamp_curve[5].x = HZ2SLOT(3500);
+	clamp_curve[5].y = 0;
+
 	clamp_curve[6].x = HZ2SLOT(44500);
+	clamp_curve[6].y = 0;
 
 	clamp_curve[7].x = HZ2SLOT(45000);
 	clamp_curve[7].y = num_samples;
@@ -510,11 +552,13 @@ distort_EQ(distort_t *dis, const int16_t *samples, int16_t *out_samples,
 	clamp_curve[8].y = CENTER_AMPLIFY * num_samples;
 
 	clamp_curve[9].x = HZ2SLOT(47700);
-	clamp_curve[9].y = num_samples;
+	clamp_curve[9].y = LOW_AMPLIFY * num_samples;
 
-	clamp_curve[10].x = HZ2SLOT(47750);
+	clamp_curve[10].x = HZ2SLOT(47760);
+	clamp_curve[10].y = 0;
 
 	clamp_curve[11].x = HZ2SLOT(48000);
+	clamp_curve[11].y = 0;
 
 	for (i = 0; i < num_samples; i++) {
 		/* apply noise to the input */
