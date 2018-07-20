@@ -118,7 +118,7 @@ crc64_init(void)
 static uint64_t
 crc64(const void *input, size_t sz)
 {
-	const uint8_t *in_bytes = input;
+	const uint8_t *in_bytes = (uint8_t *) input;
 	uint64_t crc = -1ULL;
 	size_t i;
 
@@ -254,7 +254,7 @@ wavg(double x, double y, double w)
 distort_t *
 distort_init(unsigned sample_rate)
 {
-	distort_t *dis = calloc(1, sizeof (*dis));
+	distort_t *dis = (distort_t *) calloc(1, sizeof (*dis));
 	size_t chunksz;
 
 	/* Init shared state */
@@ -273,9 +273,9 @@ distort_init(unsigned sample_rate)
 	dis->amplify = 1.0;
 
 	chunksz = dis->srate / dis->time_quantum;
-	dis->tmpbuf = calloc(chunksz, sizeof (*dis->tmpbuf));
-	dis->fin = calloc(chunksz, sizeof (*dis->fin));
-	dis->fout = calloc(chunksz, sizeof (*dis->fout));
+	dis->tmpbuf = (int16_t *) calloc(chunksz, sizeof (*dis->tmpbuf));
+	dis->fin = (kiss_fft_cpx *) calloc(chunksz, sizeof (*dis->fin));
+	dis->fout = (kiss_fft_cpx *) calloc(chunksz, sizeof (*dis->fout));
 	dis->cfg = kiss_fft_alloc(chunksz, 0, NULL, NULL);
 	dis->cfg_inv = kiss_fft_alloc(chunksz, 1, NULL, NULL);
 
@@ -302,7 +302,8 @@ void
 distort(distort_t *dis, int16_t *samples, size_t num_samples,
     double amplify, double noise_level)
 {
-	int16_t *out_samples = calloc(num_samples, sizeof (*out_samples));
+	int16_t *out_samples = (int16_t *) calloc(num_samples,
+	    sizeof (*out_samples));
 
 	distort_impl(dis, samples, out_samples, num_samples, amplify,
 	    noise_level);
@@ -334,7 +335,7 @@ distort_impl(distort_t *dis, const int16_t *in_samples, int16_t *out_samples,
 	/* Grow our input buffer if necessary */
 	if (dis->inbuf_fill + num_samples > dis->inbuf_cap) {
 		dis->inbuf_cap = dis->inbuf_fill + num_samples;
-		dis->inbuf = realloc(dis->inbuf,
+		dis->inbuf = (int16_t *) realloc(dis->inbuf,
 		    sizeof (*dis->inbuf) * dis->inbuf_cap);
 	}
 	/* Stick newly incoming data on the end of our input buffer */
@@ -412,7 +413,7 @@ distort_process(distort_t *dis)
 		 */
 		if (dis->outbuf_fill + chunksz > dis->outbuf_cap) {
 			dis->outbuf_cap += chunksz;
-			dis->outbuf = realloc(dis->outbuf,
+			dis->outbuf = (int16_t *) realloc(dis->outbuf,
 			    sizeof (*dis->outbuf) * dis->outbuf_cap);
 		}
 		memcpy(&dis->outbuf[dis->outbuf_fill],
