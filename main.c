@@ -22,7 +22,7 @@ main(void)
 	while (!feof(stdin)) {
 		if (bufsz + READSZ > bufcap) {
 			bufcap += READSZ;
-			buf = realloc(buf, bufcap);
+			buf = (uint8_t *)realloc(buf, bufcap);
 		}
 		bufsz += fread(&buf[bufsz], 1, bufcap - bufsz, stdin);
 		if (ferror(stdin)) {
